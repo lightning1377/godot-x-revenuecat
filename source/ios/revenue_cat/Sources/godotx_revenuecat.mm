@@ -7,6 +7,19 @@
 
 GodotxRevenueCat *GodotxRevenueCat::instance = nullptr;
 
+static Array godotx_non_sub_transactions_array(RCCustomerInfo *info) {
+    Array arr;
+    if (!info) return arr;
+    for (RCNonSubscriptionTransaction *tx in info.nonSubscriptions) {
+        Dictionary d;
+        d["transaction_id"] = String::utf8(tx.transactionIdentifier.UTF8String);
+        d["product_id"] = String::utf8(tx.productIdentifier.UTF8String);
+        d["purchase_date"] = (int64_t)([tx.purchaseDate timeIntervalSince1970] * 1000.0);
+        arr.push_back(d);
+    }
+    return arr;
+}
+
 static Dictionary godotx_customer_info_dict(RCCustomerInfo *info) {
     Dictionary d;
     d["active_entitlements"] = info ? (int)info.entitlements.active.count : 0;
@@ -17,6 +30,7 @@ static Dictionary godotx_customer_info_dict(RCCustomerInfo *info) {
         }
     }
     d["active_ids"] = ids;
+    d["non_subscription_transactions"] = godotx_non_sub_transactions_array(info);
     return d;
 }
 
@@ -338,12 +352,14 @@ void GodotxRevenueCat::restore_purchases() {
         int count = info ? (int)info.entitlements.active.count : 0;
         String err = error ? String::utf8(error.localizedDescription.UTF8String) : "";
         bool success = error == nil;
+        Array non_sub = godotx_non_sub_transactions_array(info);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             Dictionary d;
             d["success"] = success;
             d["restored"] = count > 0;
             d["active_entitlements"] = count;
+            d["non_subscription_transactions"] = non_sub;
             d["error"] = err;
             emit_signal("restore_finished", d);
         });

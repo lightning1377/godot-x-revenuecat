@@ -258,6 +258,7 @@ and the same Godot types on iOS and Android:
 | `success` | `bool` | `false` only when the restore itself failed |
 | `restored` | `bool` | `true` when at least one entitlement is active afterwards |
 | `active_entitlements` | `int` | Count of active entitlements, `0` on failure |
+| `non_subscription_transactions` | `Array` | Non-subscription / consumable purchases (`transaction_id`, `product_id`, `purchase_date` in ms unix timestamp), `[]` on failure or none |
 | `error` | `String` | The SDK's own message, `""` on success |
 
 ### Show Native Paywall
@@ -293,8 +294,9 @@ func _on_customer_info_changed(data: Dictionary):
 |-----|------|-------|
 | `active_entitlements` | `int` | Count of active entitlements, `0` if there are none |
 | `active_ids` | `PackedStringArray` | The active entitlements' identifiers, `[]` if there are none |
+| `non_subscription_transactions` | `Array` | Non-subscription / consumable purchases (`transaction_id`, `product_id`, `purchase_date` in ms unix timestamp), `[]` if there are none |
 
-Use `active_ids` to gate on a specific entitlement, and `active_entitlements` only when a count is all you need. When a `get_customer_info()` fetch fails, `customer_info` carries an `error` key with the SDK's own message.
+Use `active_ids` to gate on a specific entitlement, and `active_entitlements` only when a count is all you need. Use `non_subscription_transactions` to detect and reconcile consumable / non-subscription purchases. When a `get_customer_info()` fetch fails, `customer_info` carries an `error` key with the SDK's own message.
 
 ### Login & Logout
 

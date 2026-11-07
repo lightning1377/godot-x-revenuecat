@@ -74,11 +74,27 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
         return d
     }
 
+    // Object[], never ArrayList and never Array<Dictionary>: Godot's JNI
+    // (jni_utils.cpp _jobject_to_variant) matches "[Ljava.lang.Object;" to build a
+    // Godot Array, recursing into each element. Anything else reaches GDScript as an opaque JavaObject.
+    private fun nonSubTransactionsArray(info: CustomerInfo): Array<Any> {
+        val list = info.nonSubscriptionTransactions
+        return Array<Any>(list.size) { index ->
+            val tx = list[index]
+            val d = Dictionary()
+            d["transaction_id"] = tx.transactionIdentifier
+            d["product_id"] = tx.productIdentifier
+            d["purchase_date"] = tx.purchaseDate.time
+            d
+        }
+    }
+
     private fun customerInfoDict(info: CustomerInfo): Dictionary {
         val d = Dictionary()
         d["active_entitlements"] = info.entitlements.active.size
         // Must stay String[]: Godot's JNI bridge converts it to PackedStringArray, a List would reach GDScript as an opaque JavaObject.
         d["active_ids"] = info.entitlements.active.keys.toTypedArray()
+        d["non_subscription_transactions"] = nonSubTransactionsArray(info)
         return d
     }
 
@@ -320,27 +336,27 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
         })
     }
 
-    private fun emitRestoreFinished(success: Boolean, entitlements: Int, error: String) {
-        emitOnMain(
-            "restore_finished",
-            dictOf(
-                "success" to success,
-                "restored" to (entitlements > 0),
-                "active_entitlements" to entitlements,
-                "error" to error
-            )
+    private fun emitRestoreFinished(success: Boolean, info: CustomerInfo?, error: String) {
+        val entitlements = info?.entitlements?.active?.size ?: 0
+        val d = dictOf(
+            "success" to success,
+            "restored" to (entitlements > 0),
+            "active_entitlements" to entitlements,
+            "error" to error
         )
+        d["non_subscription_transactions"] = if (info != null) nonSubTransactionsArray(info) else emptyArray<Any>()
+        emitOnMain("restore_finished", d)
     }
 
     @UsedByGodot
     fun restore_purchases() {
         Purchases.sharedInstance.restorePurchasesWith(
             onError = { error ->
-                emitRestoreFinished(false, 0, error.message)
+                emitRestoreFinished(false, null, error.message)
             },
             onSuccess = { customerInfo ->
                 currentCustomerInfo = customerInfo
-                emitRestoreFinished(true, customerInfo.entitlements.active.size, "")
+                emitRestoreFinished(true, customerInfo, "")
             }
         )
     }
