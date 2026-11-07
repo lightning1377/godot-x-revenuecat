@@ -83,6 +83,7 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
             val tx = list[index]
             val d = Dictionary()
             d["transaction_id"] = tx.transactionIdentifier
+            d["store_transaction_id"] = tx.storeTransactionId ?: ""
             d["product_id"] = tx.productIdentifier
             d["purchase_date"] = tx.purchaseDate.time
             d
@@ -246,18 +247,19 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
                         customerInfo: CustomerInfo
                     ) {
                         currentCustomerInfo = customerInfo
-                        val d = Dictionary()
+                        val rcTx = customerInfo.nonSubscriptionTransactions.lastOrNull { it.productIdentifier == pid }
+                        val rcId = rcTx?.transactionIdentifier ?: ""
+                        val storeId = rcTx?.storeTransactionId ?: storeTransaction.orderId ?: ""
+                        val mainTxId = rcId.ifEmpty { storeId }
 
-                        val transactionId = storeTransaction.orderId ?: ""
-                        val entitlementsCount = customerInfo.entitlements.active.size
-
-                        d["cancelled"] = false
-                        d["active_entitlements"] = entitlementsCount
-                        d["error"] = ""
-                        d["product_id"] = pid
-                        d["transaction_id"] = transactionId
-
-                        emitOnMain("purchase_result", d)
+                        emitPurchaseResult(
+                            false,
+                            customerInfo.entitlements.active.size,
+                            "",
+                            pid,
+                            mainTxId,
+                            storeId
+                        )
                     }
                 })
             }
@@ -269,7 +271,8 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
         entitlements: Int,
         error: String,
         productId: String,
-        transactionId: String
+        transactionId: String,
+        storeTransactionId: String = ""
     ) {
         val d = Dictionary()
         d["cancelled"] = cancelled
@@ -277,6 +280,7 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
         d["error"] = error
         d["product_id"] = productId
         d["transaction_id"] = transactionId
+        d["store_transaction_id"] = storeTransactionId
         emitOnMain("purchase_result", d)
     }
 
@@ -323,12 +327,18 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
                         customerInfo: CustomerInfo
                     ) {
                         currentCustomerInfo = customerInfo
+                        val rcTx = customerInfo.nonSubscriptionTransactions.lastOrNull { it.productIdentifier == pkg.product.id }
+                        val rcId = rcTx?.transactionIdentifier ?: ""
+                        val storeId = rcTx?.storeTransactionId ?: storeTransaction.orderId ?: ""
+                        val mainTxId = rcId.ifEmpty { storeId }
+
                         emitPurchaseResult(
                             false,
                             customerInfo.entitlements.active.size,
                             "",
                             pkg.product.id,
-                            storeTransaction.orderId ?: ""
+                            mainTxId,
+                            storeId
                         )
                     }
                 })

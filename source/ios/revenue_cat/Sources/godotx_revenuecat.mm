@@ -13,6 +13,7 @@ static Array godotx_non_sub_transactions_array(RCCustomerInfo *info) {
     for (RCNonSubscriptionTransaction *tx in info.nonSubscriptions) {
         Dictionary d;
         d["transaction_id"] = String::utf8(tx.transactionIdentifier.UTF8String);
+        d["store_transaction_id"] = tx.storeTransactionIdentifier ? String::utf8(tx.storeTransactionIdentifier.UTF8String) : "";
         d["product_id"] = String::utf8(tx.productIdentifier.UTF8String);
         d["purchase_date"] = (int64_t)([tx.purchaseDate timeIntervalSince1970] * 1000.0);
         arr.push_back(d);
@@ -162,7 +163,10 @@ void GodotxRevenueCat::purchase(String pid) {
             if (info) currentCustomerInfo = info;
             int count = info ? (int)info.entitlements.active.count : 0;
             String err = error ? String::utf8(error.localizedDescription.UTF8String) : "";
-            String tid = tx && tx.transactionIdentifier ? String::utf8(tx.transactionIdentifier.UTF8String) : "";
+            RCNonSubscriptionTransaction *rcTx = info ? info.nonSubscriptions.lastObject : nil;
+            String rcId = rcTx && rcTx.transactionIdentifier ? String::utf8(rcTx.transactionIdentifier.UTF8String) : "";
+            String storeId = tx && tx.transactionIdentifier ? String::utf8(tx.transactionIdentifier.UTF8String) : (rcTx && rcTx.storeTransactionIdentifier ? String::utf8(rcTx.storeTransactionIdentifier.UTF8String) : "");
+            String tid = rcId.is_empty() ? storeId : rcId;
             
             dispatch_async(dispatch_get_main_queue(), ^{
                 Dictionary d;
@@ -171,6 +175,7 @@ void GodotxRevenueCat::purchase(String pid) {
                 d["error"] = error ? err : "";
                 d["product_id"] = pid;
                 d["transaction_id"] = tid;
+                d["store_transaction_id"] = storeId;
                 emit_signal("purchase_result", d);
             });
         }];
@@ -471,13 +476,14 @@ void GodotxRevenueCat::present_paywall(String offering_id) {
     }];
 }
 
-static void godotx_revenuecat_emit_purchase_result(bool cancelled, int entitlements, const String &error, const String &product_id, const String &transaction_id) {
+static void godotx_revenuecat_emit_purchase_result(bool cancelled, int entitlements, const String &error, const String &product_id, const String &transaction_id, const String &store_transaction_id = "") {
     Dictionary d;
     d["cancelled"] = cancelled;
     d["active_entitlements"] = entitlements;
     d["error"] = error;
     d["product_id"] = product_id;
     d["transaction_id"] = transaction_id;
+    d["store_transaction_id"] = store_transaction_id;
     GodotxRevenueCat::get_singleton()->emit_signal("purchase_result", d);
 }
 
@@ -527,10 +533,13 @@ void GodotxRevenueCat::purchase_package(String offering_id, String package_id) {
             if (info) currentCustomerInfo = info;
             int count = info ? (int)info.entitlements.active.count : 0;
             String err = purchase_error ? String::utf8(purchase_error.localizedDescription.UTF8String) : "";
-            String tid = tx && tx.transactionIdentifier ? String::utf8(tx.transactionIdentifier.UTF8String) : "";
+            RCNonSubscriptionTransaction *rcTx = info ? info.nonSubscriptions.lastObject : nil;
+            String rcId = rcTx && rcTx.transactionIdentifier ? String::utf8(rcTx.transactionIdentifier.UTF8String) : "";
+            String storeId = tx && tx.transactionIdentifier ? String::utf8(tx.transactionIdentifier.UTF8String) : (rcTx && rcTx.storeTransactionIdentifier ? String::utf8(rcTx.storeTransactionIdentifier.UTF8String) : "");
+            String tid = rcId.is_empty() ? storeId : rcId;
 
             dispatch_async(dispatch_get_main_queue(), ^{
-                godotx_revenuecat_emit_purchase_result(cancelled, count, err, pid, tid);
+                godotx_revenuecat_emit_purchase_result(cancelled, count, err, pid, tid, storeId);
             });
         }];
     }];
