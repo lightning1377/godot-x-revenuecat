@@ -263,13 +263,7 @@ void GodotxRevenueCat::fetch_products(Array ids) {
         dispatch_async(dispatch_get_main_queue(), ^{
             Array arr;
             for (RCStoreProduct *p in products) {
-                Dictionary o;
-                o["id"] = p.productIdentifier ? String::utf8(p.productIdentifier.UTF8String) : "";
-                o["title"] = p.localizedTitle ? String::utf8(p.localizedTitle.UTF8String) : "";
-                o["description"] = p.localizedDescription ? String::utf8(p.localizedDescription.UTF8String) : "";
-                o["price"] = p.localizedPriceString ? String::utf8(p.localizedPriceString.UTF8String) : "";
-                o["amount"] = (double)p.price.doubleValue;
-                arr.append(o);
+                arr.append(godotx_revenuecat_product_dict(p));
             }
             
             Dictionary result;
