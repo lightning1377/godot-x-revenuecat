@@ -132,8 +132,57 @@ func _on_purchase_result(data):
 
 ```gdscript
 # Offerings
+revenuecat.offerings.connect(_on_offerings_received)
 revenuecat.fetch_offerings()
 
+func _on_offerings_received(data: Dictionary):
+    var error = data.get("error", "")
+    if error != "":
+        print("Error: ", error)
+        return
+
+    # The current offering's identifier, and its packages ready to display.
+    print("Current offering: ", data["identifier"])
+
+    for pkg in data["packages"]:
+        var product = pkg["product"]
+        print("Package: ", pkg["identifier"], " (", pkg["package_type"], ")")
+        print("  ", product["title"], " - ", product["price"])
+
+    # Every offering, including the current one.
+    for offering in data["offerings"]:
+        print(offering["identifier"], " has ", offering["packages"].size(), " packages")
+```
+
+The `offerings` signal carries the same keys and the same Godot types on iOS and Android:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `error` | `String` | `""` when the fetch succeeded |
+| `identifier` | `String` | The current offering's identifier, `""` if there is none |
+| `packages` | `Array` | The current offering's packages, `[]` if there is none |
+| `offerings` | `Array` | Every offering: `{ "identifier": String, "packages": Array }` |
+
+Each entry of a `packages` array is a `Dictionary`:
+
+| Key | Type | Example |
+|-----|------|---------|
+| `identifier` | `String` | `"$rc_monthly"` |
+| `package_type` | `String` | `"MONTHLY"`, `"ANNUAL"`, `"SIX_MONTH"`, `"THREE_MONTH"`, `"TWO_MONTH"`, `"WEEKLY"`, `"LIFETIME"`, `"CUSTOM"`, `"UNKNOWN"` |
+| `product` | `Dictionary` | The underlying store product |
+
+Each `product` uses the same keys as `fetch_products`, plus `currency`:
+
+| Key | Type | Example |
+|-----|------|---------|
+| `id` | `String` | `"premium_monthly"` |
+| `title` | `String` | `"Premium"` |
+| `description` | `String` | `"Unlock everything"` |
+| `price` | `String` | `"$4.99"` (localized) |
+| `amount` | `float` | `4.99` |
+| `currency` | `String` | `"USD"` |
+
+```gdscript
 # Products (for custom UI)
 revenuecat.products.connect(_on_products_received)
 revenuecat.fetch_products(["premium_monthly", "premium_yearly"])
@@ -173,9 +222,44 @@ func _on_products_received(data: Dictionary):
 revenuecat.purchase("premium_monthly")
 ```
 
+Purchase a package from an offering instead of a bare product id. Pass `""` as the offering id to
+use the current offering. This is the only way to buy a Google Play subscription that has more than
+one base plan, because the `Package` carries the base plan and a product id cannot.
+
 ```gdscript
-revenuecat.restore_purchases()
+revenuecat.purchase_package("", "$rc_monthly")
+revenuecat.purchase_package("default", "$rc_annual")
 ```
+
+Both paths emit the same `purchase_result` dictionary, so a single handler serves both. On failure
+`error` is one of the SDK's own messages or `offering_not_found`, `package_not_found`, or
+`activity_null` (Android only, as with `purchase`).
+
+```gdscript
+revenuecat.restore_finished.connect(_on_restore_finished)
+revenuecat.restore_purchases()
+
+func _on_restore_finished(data: Dictionary):
+    if not data["success"]:
+        print("Restore failed: ", data["error"])
+        return
+
+    if data["restored"]:
+        print("Restored ", data["active_entitlements"], " entitlements")
+    else:
+        print("Nothing to restore")
+```
+
+`restore_finished` always fires — once, on success and on failure alike — and carries the same keys
+and the same Godot types on iOS and Android:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `success` | `bool` | `false` only when the restore itself failed |
+| `restored` | `bool` | `true` when at least one entitlement is active afterwards |
+| `active_entitlements` | `int` | Count of active entitlements, `0` on failure |
+| `non_subscription_transactions` | `Array` | Non-subscription / consumable purchases (`transaction_id`, `store_transaction_id`, `product_id`, `purchase_date` in ms unix timestamp), `[]` on failure or none |
+| `error` | `String` | The SDK's own message, `""` on success |
 
 ### Show Native Paywall
 
@@ -191,12 +275,46 @@ revenuecat.has_entitlement("premium_access")
 revenuecat.check_entitlement("premium_access")
 ```
 
+### Customer Info
+
+```gdscript
+revenuecat.customer_info_changed.connect(_on_customer_info_changed)
+revenuecat.get_customer_info()
+
+func _on_customer_info_changed(data: Dictionary):
+    if "premium_access" in data["active_ids"]:
+        print("Premium is active")
+    else:
+        print("Premium is not active")
+```
+
+`customer_info` (the reply to `get_customer_info()`) and `customer_info_changed` (emitted whenever RevenueCat updates the entitlements: a renewal, an expiry, a restore, or a purchase made on another device) carry the same keys and the same Godot types on iOS and Android:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `active_entitlements` | `int` | Count of active entitlements, `0` if there are none |
+| `active_ids` | `PackedStringArray` | The active entitlements' identifiers, `[]` if there are none |
+| `non_subscription_transactions` | `Array` | Non-subscription / consumable purchases (`transaction_id`, `store_transaction_id`, `product_id`, `purchase_date` in ms unix timestamp), `[]` if there are none |
+
+Use `active_ids` to gate on a specific entitlement, and `active_entitlements` only when a count is all you need. Use `non_subscription_transactions` to detect and reconcile consumable / non-subscription purchases. When a `get_customer_info()` fetch fails, `customer_info` carries an `error` key with the SDK's own message.
+
 ### Login & Logout
 
 ```gdscript
 revenuecat.login("user_123")
 revenuecat.logout()
 ```
+
+### Customer Attributes
+
+```gdscript
+revenuecat.set_attributes({
+    "$email": "player@example.com",
+    "favorite_mode": "endless",
+})
+```
+
+RevenueCat customer attributes are string keys with string values, so only entries whose key and value are both a `String` are forwarded. Any other entry is ignored, on iOS and Android alike.
 
 ## Advanced Configuration
 
@@ -267,9 +385,11 @@ revenuecat/
 | Method | Description |
 |--------|-------------|
 | `initialize(api_key, user_id, debug)` | Initializes SDK |
+| `get_customer_info()` | Requests the current customer info |
 | `fetch_offerings()` | Retrieves offerings |
 | `fetch_products(ids)` | Retrieves product details |
 | `purchase(id)` | Starts purchase flow |
+| `purchase_package(offering_id, package_id)` | Starts purchase flow for a package (`offering_id` `""` = current offering) |
 | `login(user_id)` | Authenticate user |
 | `logout()` | Anonymous reset |
 | `is_subscriber()` | Returns subscription state |
@@ -277,12 +397,14 @@ revenuecat/
 | `present_paywall(offering)` | Shows native UI |
 | `check_entitlement(id)` | Checks entitlement |
 | `restore_purchases` | Retrieves purchases |
+| `set_attributes(attributes)` | Sets customer attributes (string keys and string values only) |
 
 ### Signals
 
 | Signal | Args | Description |
 |--------|------|-------------|
 | `customer_info_changed` | `data: Dictionary` | On customer update |
+| `customer_info` | `data: Dictionary` | Customer info fetch result |
 | `purchase_result` | `data: Dictionary` | On purchase finish |
 | `offerings` | `data: Dictionary` | Offerings received |
 | `products` | `data: Dictionary` | Products received |

@@ -6,7 +6,9 @@ import androidx.core.content.ContextCompat
 import com.revenuecat.purchases.CacheFetchPolicy
 import com.revenuecat.purchases.CustomerInfo
 import com.revenuecat.purchases.LogLevel
+import com.revenuecat.purchases.Offering
 import com.revenuecat.purchases.Offerings
+import com.revenuecat.purchases.Package
 import com.revenuecat.purchases.PurchaseParams
 import com.revenuecat.purchases.Purchases
 import com.revenuecat.purchases.PurchasesConfiguration
@@ -17,6 +19,7 @@ import com.revenuecat.purchases.interfaces.LogInCallback
 import com.revenuecat.purchases.interfaces.PurchaseCallback
 import com.revenuecat.purchases.interfaces.ReceiveCustomerInfoCallback
 import com.revenuecat.purchases.interfaces.ReceiveOfferingsCallback
+import com.revenuecat.purchases.interfaces.UpdatedCustomerInfoListener
 import com.revenuecat.purchases.models.StoreProduct
 import com.revenuecat.purchases.models.StoreTransaction
 import com.revenuecat.purchases.restorePurchasesWith
@@ -68,6 +71,31 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
         for ((k, v) in pairs) {
             d[k] = v ?: ""
         }
+        return d
+    }
+
+    // Object[], never ArrayList and never Array<Dictionary>: Godot's JNI
+    // (jni_utils.cpp _jobject_to_variant) matches "[Ljava.lang.Object;" to build a
+    // Godot Array, recursing into each element. Anything else reaches GDScript as an opaque JavaObject.
+    private fun nonSubTransactionsArray(info: CustomerInfo): Array<Any> {
+        val list = info.nonSubscriptionTransactions
+        return Array<Any>(list.size) { index ->
+            val tx = list[index]
+            val d = Dictionary()
+            d["transaction_id"] = tx.transactionIdentifier
+            d["store_transaction_id"] = tx.storeTransactionId ?: ""
+            d["product_id"] = tx.productIdentifier
+            d["purchase_date"] = tx.purchaseDate.time
+            d
+        }
+    }
+
+    private fun customerInfoDict(info: CustomerInfo): Dictionary {
+        val d = Dictionary()
+        d["active_entitlements"] = info.entitlements.active.size
+        // Must stay String[]: Godot's JNI bridge converts it to PackedStringArray, a List would reach GDScript as an opaque JavaObject.
+        d["active_ids"] = info.entitlements.active.keys.toTypedArray()
+        d["non_subscription_transactions"] = nonSubTransactionsArray(info)
         return d
     }
 
@@ -126,7 +154,24 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
 
         Purchases.configure(builder.build())
 
+        Purchases.sharedInstance.updatedCustomerInfoListener =
+            UpdatedCustomerInfoListener { customerInfo ->
+                currentCustomerInfo = customerInfo
+                emitOnMain("customer_info_changed", customerInfoDict(customerInfo))
+            }
+
         get_customer_info()
+    }
+
+    @UsedByGodot
+    fun set_attributes(attributes: Dictionary) {
+        val map = HashMap<String, String>()
+        for ((key, value) in attributes) {
+            if (value is String) {
+                map[key] = value
+            }
+        }
+        Purchases.sharedInstance.setAttributes(map)
     }
 
     @UsedByGodot
@@ -140,10 +185,7 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
 
                 override fun onReceived(customerInfo: CustomerInfo) {
                     currentCustomerInfo = customerInfo
-                    emitOnMain(
-                        "customer_info",
-                        dictOf("active_entitlements" to customerInfo.entitlements.active.size)
-                    )
+                    emitOnMain("customer_info", customerInfoDict(customerInfo))
                 }
             }
         )
@@ -205,38 +247,163 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
                         customerInfo: CustomerInfo
                     ) {
                         currentCustomerInfo = customerInfo
-                        val d = Dictionary()
+                        val rcTx = customerInfo.nonSubscriptionTransactions.lastOrNull { it.productIdentifier == pid }
+                        val rcId = rcTx?.transactionIdentifier ?: ""
+                        val storeId = rcTx?.storeTransactionId ?: storeTransaction.orderId ?: ""
+                        val mainTxId = rcId.ifEmpty { storeId }
 
-                        val transactionId = storeTransaction.orderId ?: ""
-                        val entitlementsCount = customerInfo.entitlements.active.size
-
-                        d["cancelled"] = false
-                        d["active_entitlements"] = entitlementsCount
-                        d["error"] = ""
-                        d["product_id"] = pid
-                        d["transaction_id"] = transactionId
-
-                        emitOnMain("purchase_result", d)
+                        emitPurchaseResult(
+                            false,
+                            customerInfo.entitlements.active.size,
+                            "",
+                            pid,
+                            mainTxId,
+                            storeId
+                        )
                     }
                 })
             }
         })
     }
 
+    private fun emitPurchaseResult(
+        cancelled: Boolean,
+        entitlements: Int,
+        error: String,
+        productId: String,
+        transactionId: String,
+        storeTransactionId: String = ""
+    ) {
+        val d = Dictionary()
+        d["cancelled"] = cancelled
+        d["active_entitlements"] = entitlements
+        d["error"] = error
+        d["product_id"] = productId
+        d["transaction_id"] = transactionId
+        d["store_transaction_id"] = storeTransactionId
+        emitOnMain("purchase_result", d)
+    }
+
+    @UsedByGodot
+    fun purchase_package(offering_id: String, package_id: String) {
+        val a = act()
+        if (a == null) {
+            emitPurchaseResult(false, 0, "activity_null", "", "")
+            return
+        }
+
+        Purchases.sharedInstance.getOfferings(object : ReceiveOfferingsCallback {
+            override fun onError(error: PurchasesError) {
+                emitPurchaseResult(false, 0, error.message, "", "")
+            }
+
+            override fun onReceived(offerings: Offerings) {
+                val offering =
+                    if (offering_id.isNotEmpty()) offerings.all[offering_id] else offerings.current
+
+                if (offering == null) {
+                    emitPurchaseResult(false, 0, "offering_not_found", "", "")
+                    return
+                }
+
+                val pkg = offering.availablePackages.firstOrNull { it.identifier == package_id }
+
+                if (pkg == null) {
+                    emitPurchaseResult(false, 0, "package_not_found", "", "")
+                    return
+                }
+
+                // Purchasing the Package (not a re-resolved product id) is what carries the
+                // Google Play base plan / subscriptionOption that purchase(String) cannot express.
+                val params = PurchaseParams.Builder(a, pkg).build()
+
+                Purchases.sharedInstance.purchase(params, object : PurchaseCallback {
+                    override fun onError(error: PurchasesError, userCancelled: Boolean) {
+                        emitPurchaseResult(userCancelled, 0, error.message, pkg.product.id, "")
+                    }
+
+                    override fun onCompleted(
+                        storeTransaction: StoreTransaction,
+                        customerInfo: CustomerInfo
+                    ) {
+                        currentCustomerInfo = customerInfo
+                        val rcTx = customerInfo.nonSubscriptionTransactions.lastOrNull { it.productIdentifier == pkg.product.id }
+                        val rcId = rcTx?.transactionIdentifier ?: ""
+                        val storeId = rcTx?.storeTransactionId ?: storeTransaction.orderId ?: ""
+                        val mainTxId = rcId.ifEmpty { storeId }
+
+                        emitPurchaseResult(
+                            false,
+                            customerInfo.entitlements.active.size,
+                            "",
+                            pkg.product.id,
+                            mainTxId,
+                            storeId
+                        )
+                    }
+                })
+            }
+        })
+    }
+
+    private fun emitRestoreFinished(success: Boolean, info: CustomerInfo?, error: String) {
+        val entitlements = info?.entitlements?.active?.size ?: 0
+        val d = dictOf(
+            "success" to success,
+            "restored" to (entitlements > 0),
+            "active_entitlements" to entitlements,
+            "error" to error
+        )
+        d["non_subscription_transactions"] = if (info != null) nonSubTransactionsArray(info) else emptyArray<Any>()
+        emitOnMain("restore_finished", d)
+    }
+
     @UsedByGodot
     fun restore_purchases() {
-        Purchases.sharedInstance.restorePurchasesWith() { customerInfo ->
-            currentCustomerInfo = customerInfo
+        Purchases.sharedInstance.restorePurchasesWith(
+            onError = { error ->
+                emitRestoreFinished(false, null, error.message)
+            },
+            onSuccess = { customerInfo ->
+                currentCustomerInfo = customerInfo
+                emitRestoreFinished(true, customerInfo, "")
+            }
+        )
+    }
 
-            val restoredCount = customerInfo.entitlements.active.size
+    private fun productDict(product: StoreProduct): Dictionary {
+        return Dictionary().apply {
+            this["id"] = product.id
+            this["title"] = product.title
+            this["description"] = product.description
+            this["price"] = product.price.formatted
+            this["amount"] = product.price.amountMicros / 1_000_000.0
+            this["currency"] = product.price.currencyCode
+        }
+    }
 
-            emitOnMain(
-                "restore_finished",
-                dictOf(
-                    "active_entitlements" to restoredCount,
-                    "restored" to (restoredCount > 0)
-                )
-            )
+    private fun packageDict(pkg: Package): Dictionary {
+        return Dictionary().apply {
+            this["identifier"] = pkg.identifier
+            this["package_type"] = pkg.packageType.name
+            this["product"] = productDict(pkg.product)
+        }
+    }
+
+    // Object[], never ArrayList and never Array<Dictionary>: Godot's JNI
+    // (jni_utils.cpp _jobject_to_variant) matches exactly "[Ljava.lang.Object;" to build a
+    // Godot Array, recursing into each element. Anything else reaches GDScript as an opaque
+    // JavaObject. Same constraint fetch_products is written against.
+    private fun packagesArray(packages: List<Package>): Array<Any> {
+        return Array<Any>(packages.size) { index -> packageDict(packages[index]) }
+    }
+
+    private fun offeringsArray(offerings: List<Offering>): Array<Any> {
+        return Array<Any>(offerings.size) { index ->
+            Dictionary().apply {
+                this["identifier"] = offerings[index].identifier
+                this["packages"] = packagesArray(offerings[index].availablePackages)
+            }
         }
     }
 
@@ -245,18 +412,23 @@ class RevenueCatPlugin(godot: Godot) : GodotPlugin(godot) {
         Purchases.sharedInstance.getOfferings(
             object : ReceiveOfferingsCallback {
                 override fun onError(error: PurchasesError) {
-                    emitOnMain("offerings", dictOf("error" to error.message))
+                    val result = Dictionary()
+                    result["error"] = error.message
+                    result["identifier"] = ""
+                    result["packages"] = emptyArray<Any>()
+                    result["offerings"] = emptyArray<Any>()
+                    emitOnMain("offerings", result)
                 }
 
                 override fun onReceived(offerings: Offerings) {
                     val current = offerings.current
-                    emitOnMain(
-                        "offerings",
-                        dictOf(
-                            "identifier" to (current?.identifier ?: ""),
-                            "available_packages" to (current?.availablePackages?.size ?: 0)
-                        )
-                    )
+
+                    val result = Dictionary()
+                    result["error"] = ""
+                    result["identifier"] = current?.identifier ?: ""
+                    result["packages"] = packagesArray(current?.availablePackages ?: emptyList())
+                    result["offerings"] = offeringsArray(offerings.all.values.toList())
+                    emitOnMain("offerings", result)
                 }
             }
         )
